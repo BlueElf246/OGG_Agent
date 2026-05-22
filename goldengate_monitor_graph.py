@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any, Literal, TypedDict
 
@@ -19,6 +20,8 @@ memory = InMemorySaver()
 model = ChatOpenAI(model="gpt-3.5-turbo", temperature=0).bind_tools(
     [connect_ssh, get_process, check_log, check_disk]
 )
+MAX_DISCOVERY_ATTEMPTS = 3
+
 def _default_config() -> dict[str, Any]:
     return {
         "server":{
@@ -79,6 +82,9 @@ class AgentState(TypedDict, total=False):
     good_summary: str
     bad_summary: str
     report: str
+    discover_attempts: int
+    discovery_status: Literal["complete", "retry", "failed"]
+    discovery_prompt: str
 
 PLAN_PROMPT="""
 You are a helpful assistant. call the tools if asked.
@@ -97,6 +103,7 @@ def llm_node(state: AgentState) -> dict[str, Any]:
         HumanMessage(content=state["task"]),
     ]
     response = model.invoke(messages)
+    # print(f"LLM response: {response}")
     content = getattr(response, "content", "")
     intent = "monitor_ogg" if "monitor_ogg" in str(content).lower() else "chat"
     if intent == "chat":
@@ -129,32 +136,108 @@ def monitor_plan_node(state: AgentState) -> dict[str, Any]:
         "recommendations": config["recommendations"],
     }
     return {"monitor_plan": plan}
-def _get_discover_prompt(info):
+def _get_discover_prompt(info, missing_fields: list[str] | None = None, attempt: int = 1):
+    missing_text = ", ".join(missing_fields) if missing_fields else "process_info, process_log, disk_usage"
     DISCOVER_PROMPT="""
     Here is the infomation to connect to host and get the processes infomation
-    {}. Using tools
-    `connect to host`: connect to host
-    `get processes`: get the list of GoldenGate processes, including their names, types, and hosts.
-    `check log`: check the log of a process, return the recent log content.
-    `check disk usuage`: check the disk usage of OGG home, trail and report directory, return the usage percentage.
+    {}. Here are some tools you can use to retrieve the information:
+    1. get_process to get the list of GoldenGate processes, including their names, types, and hosts.
+    2. check_log to check the log of a specific process for any error messages or warnings.
+    3. check_disk to inspect the disk usage of the host, especially for the filesystems   
     """.format(info)
-    HUMAN_PROMPT="""    Please use the above information to connect to the host and retrieve the list of GoldenGate processes, including their names, types, and hosts. Return the information in a structured format like this:
+    HUMAN_PROMPT="""    Attempt {attempt}/{max_attempts}.
+    Missing or incomplete fields from the previous discovery attempt: {missing_text}.
+    Please use the above information to connect to the host and retrieve the list of GoldenGate processes, including their names, types, and hosts. Return the information in a structured format like this:
     [
-        {"name": "EXT_SALES", "type": "EXTRACT", "host": "db-goldengate-01"},
-        {"name": "REP_SALES", "type": "REPLICAT", "host": "db-goldengate-01"},
+        {{`process_info`: (output from `get processes` command)}},
+        {{`process_log`: (output from `check log` command for a specific process)}},
+        {{`disk_usage`: (output from `check disk usage` command)}},
         ...
-    ]"""
+    ]""".format(attempt=attempt, max_attempts=MAX_DISCOVERY_ATTEMPTS, missing_text=missing_text)
     return DISCOVER_PROMPT, HUMAN_PROMPT
+
+
+def _discovery_result_fields(data: Any) -> set[str]:
+    fields: set[str] = set()
+    print(f"Discovery result data: {data}")
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            fields.update(str(key) for key in value.keys())
+            for item in value.values():
+                visit(item)
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return
+            try:
+                visit(json.loads(text))
+            except Exception:
+                lowered = text.lower()
+                for field in ("process_info", "process_log", "disk_usage"):
+                    if field in lowered:
+                        fields.add(field)
+
+    visit(data)
+    return fields
+
+
+def _discovery_is_complete(data: Any) -> tuple[bool, list[str]]:
+    required_fields = {"process_info", "process_log", "disk_usage"}
+    found_fields = _discovery_result_fields(data)
+    missing_fields = sorted(required_fields - found_fields)
+    return not missing_fields, missing_fields
+
+def orchestration_node(state: AgentState):
+    discovered_processes = state.get("discovered_processes", [])
+    attempts = state.get("discover_attempts", 0)
+    is_complete, missing_fields = _discovery_is_complete(discovered_processes)
+
+    if is_complete:
+        return {
+            "discover_attempts": attempts,
+            "discovery_status": "complete",
+        }
+
+    next_attempt = attempts + 1
+    _, retry_prompt = _get_discover_prompt(
+        state["monitor_plan"]["host"],
+        missing_fields=missing_fields,
+        attempt=next_attempt,
+    )
+    return {
+        "discover_attempts": next_attempt,
+        "discovery_status": "failed" if next_attempt >= MAX_DISCOVERY_ATTEMPTS else "retry",
+        "discovery_prompt": retry_prompt,
+    }
+
+
+def route_from_discovery(state: AgentState):
+    if state.get("discovery_status") == "complete":
+        return "classify_problem"
+    if state.get("discover_attempts", 0) >= MAX_DISCOVERY_ATTEMPTS:
+        return END
+    return "discover_processes"
+
 def discover_processes_node(state: AgentState) -> dict[str, Any]:
     monitor_plan = state["monitor_plan"]
     #### retrieve the host information
-    system_message, human_message = _get_discover_prompt(monitor_plan["host"])
+    system_message, default_human_message = _get_discover_prompt(
+        monitor_plan["host"],
+        attempt=state.get("discover_attempts", 0) + 1,
+    )
+    human_message = state.get("discovery_prompt", default_human_message)
     messages = [
         SystemMessage(content=system_message),
         HumanMessage(content=human_message)
     ]
     response = model.invoke(messages)
-    return {"discovered_processes": response}
+
+    return {"discovered_processes": getattr(response, "content", str(response))}
 
 def _get_classify_prompt(info, rules):
     CLASSIFY_PROMPT = """
@@ -212,6 +295,7 @@ def build_graph():
     builder.add_node("intake", intake_node)
     builder.add_node("monitor_plan", monitor_plan_node)
     builder.add_node("discover_processes", discover_processes_node)
+    builder.add_node("orchestration", orchestration_node)
     builder.add_node("classify_problem", classify_problem_node)
     builder.add_node("announce_user", announce_user_node)
 
@@ -219,7 +303,8 @@ def build_graph():
     builder.add_conditional_edges("llm_node", route_from_intent)
     builder.add_edge("intake", "monitor_plan")
     builder.add_edge("monitor_plan", "discover_processes")
-    builder.add_edge("discover_processes", "classify_problem")
+    builder.add_edge("discover_processes", "orchestration")
+    builder.add_conditional_edges("orchestration", route_from_discovery)
     builder.add_edge("classify_problem", "announce_user")
     builder.add_edge("announce_user", END)
 
