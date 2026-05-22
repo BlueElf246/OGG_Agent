@@ -6,7 +6,7 @@ import paramiko
 from langchain_core.tools import tool
 
 @tool
-def connect_ssh(host: str, username: str, password: str, port: int = 22, timeout: int = 10) -> str:
+def connect_ssh(host: str, username: str, password: str, port: int = 22, timeout: int = 10, key_filename: str | None = None) -> str:
     """connect to host using paramiko ssh.connect."""
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -17,6 +17,7 @@ def connect_ssh(host: str, username: str, password: str, port: int = 22, timeout
             username=username,
             password=password,
             timeout=timeout,
+            key_filename=key_filename,
         )
         return f"Connected to {host}:{port}"
     finally:
@@ -24,7 +25,7 @@ def connect_ssh(host: str, username: str, password: str, port: int = 22, timeout
 
 
 @tool
-def get_process(host: str, username: str, password: str, port: int = 22, timeout: int = 10) -> str:
+def get_process(host: str, username: str, password: str, port: int = 22, timeout: int = 10, key_filename: str | None = None) -> str:
     """get_process: run the GoldenGate 'info all' command."""
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())

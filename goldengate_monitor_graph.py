@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Literal, TypedDict
 
 from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
 from langchain_openai import ChatOpenAI
@@ -18,9 +19,52 @@ memory = InMemorySaver()
 model = ChatOpenAI(model="gpt-3.5-turbo", temperature=0).bind_tools(
     [connect_ssh, get_process, check_log, check_disk]
 )
-
+def _default_config() -> dict[str, Any]:
+    return {
+        "server":{
+            "hostname": "54.89.249.254",
+            "username": "ec2-user",
+            "password": "12345678",
+            "key_filename": "abc.pem"
+        },
+        "ogg_env": {
+            "name": "local-dev",
+            "host": "localhost",
+            "username": "oggadmin",
+            "password": "<set-in-secret-store>",
+            "ogg_home": "/u01/app/ogg",
+        },
+        "process_filters": {
+            "types": ["MANAGER", "EXTRACT", "REPLICAT", "DISTRIBUTION", "RECEIVER"],
+            "names": [],
+        },
+        "expected_processes": [],
+        "process_state_rules": {
+            "healthy_states": ["RUNNING"],
+            "bad_states": ["ABENDED", "STOPPED"],
+        },
+        "lag_time_rules": {
+            "warning_seconds": 300,
+            "critical_seconds": 900,
+        },
+        "disk_usage_rules": {
+            "ogg_home_warning_pct": 80,
+            "ogg_home_critical_pct": 90,
+            "trail_warning_pct": 80,
+            "trail_critical_pct": 90,
+            "report_warning_pct": 80,
+            "report_critical_pct": 90,
+        },
+        "recommendations": {
+            "state": "Inspect the GoldenGate report file and recent restart history before attempting any restart.",
+            "lag": "Check trail backlog, network latency, and downstream database apply performance.",
+            "disk": "Free space, rotate logs, or expand the filesystem before trail growth causes a process failure.",
+        },
+    }
 class AgentState(TypedDict, total=False):
     task: str
+    intent: Literal["monitor_ogg", "chat"]
+    chat_response: str
     config: dict[str, Any]
     available_processes: list[dict[str, Any]]
     process_metrics: dict[str, dict[str, Any]]
@@ -37,21 +81,45 @@ class AgentState(TypedDict, total=False):
     report: str
 
 PLAN_PROMPT="""
+You are a helpful assistant. call the tools if asked.
 Given the default configuration and user overrides, create a monitoring plan for the Oracle GoldenGate environment.
 {}
 """.format(_default_config())
-def intake_node(state: AgentState):
+
+def llm_node(state: AgentState) -> dict[str, Any]:
     messages = [
-        SystemMessage(content=PLAN_PROMPT), 
-        HumanMessage(content=state['task'])
+        SystemMessage(
+            content=(
+                "Classify the user's intent. Return only one token: monitor_ogg "
+                "if the user wants Oracle GoldenGate monitoring, otherwise chat."
+            )
+        ),
+        HumanMessage(content=state["task"]),
     ]
     response = model.invoke(messages)
-    return {"config": response}
+    content = getattr(response, "content", "")
+    intent = "monitor_ogg" if "monitor_ogg" in str(content).lower() else "chat"
+    if intent == "chat":
+        reply = model.invoke(
+            [
+                SystemMessage(content="You are a helpful assistant."),
+                HumanMessage(content=state["task"]),
+            ]
+        )
+        return {"intent": intent, "chat_response": getattr(reply, "content", str(reply))}
+    return {"intent": intent}
+
+def intake_node(state: AgentState):
+    return {"config": _default_config()}
+
+
+def route_from_intent(state: AgentState):
+    return "intake" if state.get("intent") == "monitor_ogg" else END
 
 def monitor_plan_node(state: AgentState) -> dict[str, Any]:
     config = state["config"]
     plan = {
-        "host": config["host"],
+        "host": config['server'],
         "ogg_env": config["ogg_env"],
         "process_filters": config["process_filters"],
         "expected_processes": config.get("expected_processes", []),
@@ -89,19 +157,19 @@ def discover_processes_node(state: AgentState) -> dict[str, Any]:
     return {"discovered_processes": response}
 
 def _get_classify_prompt(info, rules):
-    CLASSIFY_PROMPT="""
+    CLASSIFY_PROMPT = """
     Here is the monitoring data for the GoldenGate processes and disk usage:
     {}.
     Here is the monitoring plan and rules:
-    {}
+    {}.
 
     return as this format:
-    {
-        {"process_name": "EXT_SALES", "state", "severity": "healthy", "message": "EXT_SALES is running normally."},
-        {"process_name": "REP_SALES", "state", "severity": "critical", "message": "REP_SALES is in ABENDED state and log contains ERROR entries."},
-        {"disk_resource": "trail filesystem", "severity": "critical", "message": "Trail filesystem usage is 91% which exceeds the critical threshold of 90%."},
+    {{
+        {{"process_name": "EXT_SALES", "state": "RUNNING", "severity": "healthy", "message": "EXT_SALES is running normally."}},
+        {{"process_name": "REP_SALES", "state": "ABENDED", "severity": "critical", "message": "REP_SALES is in ABENDED state and log contains ERROR entries."}},
+        {{"disk_resource": "trail filesystem", "severity": "critical", "message": "Trail filesystem usage is 91% which exceeds the critical threshold of 90%."}},
          ...
-    }
+    }}
     """.format(info, rules)
     return CLASSIFY_PROMPT
 
@@ -136,57 +204,19 @@ def announce_user_node(state: AgentState) -> dict[str, Any]:
     response = model.invoke(messages)
     return {"announcement": response}
 
-def _default_config() -> dict[str, Any]:
-    return {
-        "host":{
-            "name": "localhost",
-            "username": "root",
-            "password": "<set-in-secret-store>",
-        },
-        "ogg_env": {
-            "name": "local-dev",
-            "host": "localhost",
-            "username": "oggadmin",
-            "password": "<set-in-secret-store>",
-            "ogg_home": "/u01/app/ogg",
-        },
-        "process_filters": {
-            "types": ["MANAGER", "EXTRACT", "REPLICAT", "DISTRIBUTION", "RECEIVER"],
-            "names": [],
-        },
-        "expected_processes": [],
-        "process_state_rules": {
-            "healthy_states": ["RUNNING"],
-            "bad_states": ["ABENDED", "STOPPED"],
-        },
-        "lag_time_rules": {
-            "warning_seconds": 300,
-            "critical_seconds": 900,
-        },
-        "disk_usage_rules": {
-            "ogg_home_warning_pct": 80,
-            "ogg_home_critical_pct": 90,
-            "trail_warning_pct": 80,
-            "trail_critical_pct": 90,
-            "report_warning_pct": 80,
-            "report_critical_pct": 90,
-        },
-        "recommendations": {
-            "state": "Inspect the GoldenGate report file and recent restart history before attempting any restart.",
-            "lag": "Check trail backlog, network latency, and downstream database apply performance.",
-            "disk": "Free space, rotate logs, or expand the filesystem before trail growth causes a process failure.",
-        },
-    }
+
 
 def build_graph():
     builder = StateGraph(AgentState)
+    builder.add_node("llm_node", llm_node)
     builder.add_node("intake", intake_node)
     builder.add_node("monitor_plan", monitor_plan_node)
     builder.add_node("discover_processes", discover_processes_node)
     builder.add_node("classify_problem", classify_problem_node)
     builder.add_node("announce_user", announce_user_node)
 
-    builder.set_entry_point("intake")
+    builder.set_entry_point("llm_node")
+    builder.add_conditional_edges("llm_node", route_from_intent)
     builder.add_edge("intake", "monitor_plan")
     builder.add_edge("monitor_plan", "discover_processes")
     builder.add_edge("discover_processes", "classify_problem")
@@ -201,9 +231,13 @@ graph = build_graph()
 
 if __name__ == "__main__":
     sample_state = AgentState(
-        task="Monitor the Oracle GoldenGate environment and report any issues.",
+        task=input("Enter your task: "),
     )
 
     thread = {"configurable": {"thread_id": "1"}}
     for event in graph.stream(sample_state, thread):
-        print(event)
+        # if event.intent == 'chat':
+        #     print(f"Chat response: {event.chat_response}")
+        # elif event.intent == 'monitor_ogg':
+        #     print(event)
+        print(f"Event: {event}")
