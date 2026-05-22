@@ -1,92 +1,297 @@
-## Plan: Oracle GoldenGate Monitor Graph
+# Oracle GoldenGate Monitor Implementation Plan
 
-Build a LangGraph workflow that turns GoldenGate process monitoring into a bounded investigation loop: collect process status, detect anomalies, enrich with diagnostics, assess impact and likely cause, then either resolve, notify, or escalate. Reuse the lesson’s single shared state plus conditional loop pattern, but replace essay drafting/review with operational analysis and remediation decisions. The monitor_plan node should produce explicit monitoring rules in three categories: process state, lag time, and disk usage.
+This document is aligned to the current implementation in [goldengate_monitor_graph.py](/D:/project/prj4/goldengate_monitor_graph.py). It describes what is already built, the purpose of each function and node, the current graph flow, and the main review points before the design is expanded further.
 
-**Steps**
-1. Define a monitoring-oriented shared state. Include fields for monitor_target, run_mode, inventory, process_snapshot, anomalies, evidence, assessment, actions, notifications, escalation_decision, incident_status, poll_count, max_polls, investigation_round, max_investigation_rounds, last_error, and monitor_rules. Inside monitor_rules, separate rule groups for process_state_rules, lag_time_rules, and disk_usage_rules. This replaces the lesson’s task/plan/draft/critique/content/revision fields with operational equivalents.
-2. Phase 1: intake and scope definition. Add an intake node that accepts the Oracle GoldenGate environment, process filters, thresholds, and alerting policy. Add a monitor_plan node that converts those inputs into a concrete run plan: which processes to inspect, what health criteria apply, and when to escalate. The primary output of monitor_plan should be three explicit rule sets: process state rules such as running, stopped, abended, or missing; lag time rules such as warning and critical lag thresholds; and disk usage rules such as filesystem warning and critical thresholds for GoldenGate homes, trail locations, and report directories. This is the monitoring equivalent of the lesson’s planner node.
-3. Phase 2: inventory and status collection. Add a discover_processes node to enumerate Extract, Replicat, Distribution, Receiver, and Manager processes from GGSCI, Admin Client, REST API, or deployment metadata. Add a collect_status node that gathers current process state, lag, checkpoint age, abended/stopped/running status, error snippets, last restart time, host/deployment metadata, and filesystem usage for the GoldenGate installation, trail file locations, and log/report directories. This is the operational equivalent of the initial research node.
-4. Phase 3: anomaly detection and severity classification. Add a detect_anomalies node that compares collected status against the monitor_plan rule sets and creates structured anomaly records, such as abended process, excessive lag, long checkpoint age, repeated restart, missing expected process, or disk usage above warning or critical thresholds. Add a classify_severity node that assigns severity and operator priority based on process criticality, duration, business impact, and whether a disk threshold threatens trail growth or process stability.
-5. Phase 4: evidence enrichment. Add an enrich_diagnostics node that pulls targeted evidence for each anomaly, such as report files, discard logs, recent error messages, trail file backlog, target database reachability, credential store issues, filesystem usage breakdown, recent disk growth, and deployment events. Add a correlate_context node that attaches surrounding context such as recent releases, maintenance windows, known incidents, or dependent system failures.
-6. Phase 5: assessment and decisioning. Add an assess_incident node that synthesizes the evidence into a concise operational summary: current health, suspected root cause, confidence, impact, and recommended next action. Add a review_decision node that serves the same purpose as the lesson’s reflection node, but checks whether the evidence is sufficient and chooses one of these outcomes: healthy, notify, investigate_more, escalate, or stop_due_to_error_budget.
-7. Phase 6: action handling. Add a notify_node for operator or channel notifications when issues are clear but do not require full escalation. Add an escalate_node that creates or updates an incident, ticket, or handoff package when severity or uncertainty warrants it. Add a record_observation node that persists the latest monitoring result and timestamps for auditability and trend analysis.
-8. Add bounded loop control. If review_decision returns investigate_more and investigation_round is still below the configured limit, route back to enrich_diagnostics and then reassess. If run_mode is continuous polling and the environment is healthy, route from record_observation to a wait_or_schedule_next_poll node and then back to collect_status until max_polls or an external scheduler stops the run. If run_mode is one-shot, end after record_observation when no further action is needed.
-9. Add explicit failure handling. Route telemetry collection and enrichment failures into a handle_collection_error node that records the failure, decides whether partial data is acceptable, and either continues with degraded confidence or escalates immediately.
+## Current Scope
 
-**Relevant files**
-- d:\project\prj4\context\Lesson_6_Student.py — reuse the single TypedDict state pattern, node-per-function structure, conditional edge pattern after the main synthesis step, and bounded loop concept from plan_node, research_plan_node, generation_node, reflection_node, research_critique_node, and should_continue.
+The current implementation is a read-only LangGraph workflow for Oracle GoldenGate monitoring. It does not connect to GGSCI, Admin Client, REST APIs, or operating system telemetry yet. Instead, it accepts structured input in state, applies configured monitoring rules, classifies the environment as `good` or `bad`, and produces a final report.
 
-**Verification**
-1. Validate the graph on three scenarios: all processes healthy, one Replicat abended, and one Extract with sustained lag above threshold.
-2. Confirm each anomaly path produces the expected terminal route: healthy ends cleanly, medium-severity issues notify, and severe or low-confidence issues escalate.
-3. Confirm monitor_plan emits the expected three rule groups: process_state_rules, lag_time_rules, and disk_usage_rules.
-4. Confirm the investigation loop stops when max_investigation_rounds is reached and does not spin indefinitely on unresolved evidence gaps.
-5. Confirm duplicate evidence is deduplicated or source-tagged so repeated polls do not bloat the state.
-6. Confirm partial telemetry failures still produce a deterministic decision and include degraded-confidence markers.
+The current graph implements:
 
-**Decisions**
-- Included scope: process health monitoring, lag monitoring, disk usage monitoring, anomaly detection, enrichment, assessment, notification, escalation, and optional polling loop.
-- Excluded scope: automatic restart or remediation actions. Add those only after the read-only monitoring graph is stable.
-- Assumption: GoldenGate data will come from GGSCI, Admin Client, REST API, or wrapper functions around those interfaces, and those integrations sit behind the collection/enrichment nodes rather than inside decision nodes.
-- Recommendation: keep the graph read-only first; do not let the graph mutate GoldenGate state until alert quality and escalation logic are validated.
+1. Input normalization.
+2. Monitoring rule construction.
+3. Process discovery from provided input.
+4. Status collection from provided metrics, logs, and disk values.
+5. Problem classification.
+6. Branching to good or bad reporting.
+7. Final report generation.
 
-**Further Considerations**
-1. Recommended node split: keep status collection separate from anomaly detection so the same snapshot can support both dashboards and incident triage.
-2. Recommended branch point: make review_decision the main conditional router, not assess_incident, because operational routing depends on confidence and severity checks after synthesis.
-3. Recommended persistence: replace in-memory checkpointing with a durable store before production use so investigations survive worker restarts.
+## Implemented State Contract
 
-**Proposed nodes**
-1. intake
-2. monitor_plan
-3. discover_processes
-4. collect_status
-5. detect_anomalies
-6. classify_severity
-7. enrich_diagnostics
-8. correlate_context
-9. assess_incident
-10. review_decision
-11. notify_node
-12. escalate_node
-13. record_observation
-14. wait_or_schedule_next_poll
-15. handle_collection_error
+The implemented shared state is `AgentState`.
 
-**monitor_plan outputs**
-1. process_state_rules: expected process states and routing rules for running, stopped, abended, or missing processes.
-2. lag_time_rules: warning and critical lag thresholds, optionally by process type or process name.
-3. disk_usage_rules: warning and critical filesystem thresholds for GoldenGate home, trail directories, and report or log locations.
-4. escalation_policy: how state, lag, and disk findings should map to notify versus escalate decisions.
+Current fields:
 
-**Proposed edges**
-1. intake -> monitor_plan
-2. monitor_plan -> discover_processes
-3. discover_processes -> collect_status
-4. collect_status -> detect_anomalies
-5. collect_status -> handle_collection_error when status collection fails
-6. detect_anomalies -> classify_severity
-7. classify_severity -> record_observation when no anomalies are found in one-shot mode
-8. classify_severity -> wait_or_schedule_next_poll when no anomalies are found in continuous mode
-9. classify_severity -> enrich_diagnostics when anomalies are found
-10. enrich_diagnostics -> correlate_context
-11. enrich_diagnostics -> handle_collection_error when diagnostic collection fails
-12. correlate_context -> assess_incident
-13. assess_incident -> review_decision
-14. review_decision -> record_observation when decision is healthy
-15. review_decision -> notify_node when decision is notify
-16. review_decision -> escalate_node when decision is escalate
-17. review_decision -> enrich_diagnostics when decision is investigate_more and investigation budget remains
-18. review_decision -> escalate_node when decision is investigate_more but investigation budget is exhausted
-19. notify_node -> record_observation
-20. escalate_node -> record_observation
-21. record_observation -> wait_or_schedule_next_poll in continuous mode
-22. wait_or_schedule_next_poll -> collect_status
-23. record_observation -> END in one-shot mode
-24. handle_collection_error -> assess_incident when partial data is acceptable
-25. handle_collection_error -> escalate_node when telemetry loss prevents reliable assessment
-26. handle_collection_error -> END when policy says to fail fast
+1. `task` — freeform monitoring request.
+2. `config` — user-provided configuration overrides.
+3. `available_processes` — source inventory supplied to the graph.
+4. `process_metrics` — process-level health metrics such as state and lag.
+5. `process_logs` — raw log content keyed by process name.
+6. `disk_metrics` — disk usage values for GoldenGate-related filesystems.
+7. `request_context` — normalized request details prepared by `intake_node`.
+8. `monitor_plan` — normalized rule set prepared by `monitor_plan_node`.
+9. `discovered_processes` — filtered and normalized process inventory.
+10. `status_snapshot` — collected process and disk health snapshot.
+11. `problems` — structured detected issues.
+12. `health_bucket` — branch result, currently `good` or `bad`.
+13. `good_summary` — success-path summary.
+14. `bad_summary` — failure-path summary.
+15. `report` — final operator-facing report.
 
-**Recommended minimal first version**
-1. Start with intake, discover_processes, collect_status, detect_anomalies, enrich_diagnostics, assess_incident, review_decision, notify_node, escalate_node, and record_observation.
-2. Add correlate_context, polling, and advanced error routing only after the first end-to-end path works.
-3. Keep the first release focused on read-only monitoring and operator-facing output.
+## Implemented Functions And Purpose
+
+### `_default_config()`
+Returns the default Oracle GoldenGate monitoring configuration.
+
+Purpose:
+1. Defines default OGG environment metadata.
+2. Defines process filter defaults.
+3. Defines default process state rules.
+4. Defines default lag thresholds.
+5. Defines default disk usage thresholds.
+6. Defines category-specific operator recommendations.
+
+### `_merge_dict(base, override)`
+Recursively merges user config into the default config.
+
+Purpose:
+1. Allows partial config overrides.
+2. Preserves missing default values.
+3. Keeps nested rule structures simple to customize.
+
+### `_matching_process(process, filters)`
+Checks whether a process matches the configured type and name filters.
+
+Purpose:
+1. Restricts monitoring scope.
+2. Keeps discovery and filtering logic separate.
+
+### `_extract_error_lines(log_text)`
+Extracts lines containing the word `ERROR` from a process log string.
+
+Purpose:
+1. Converts raw logs into simple error evidence.
+2. Supplies `classify_problem_node` with operator-relevant log context.
+
+### `intake_node(state)`
+Normalizes the incoming request.
+
+Purpose:
+1. Reads the user-provided config from state.
+2. Merges it into the default config.
+3. Builds `request_context` for downstream nodes.
+
+Outputs:
+1. `config`
+2. `request_context`
+
+### `monitor_plan_node(state)`
+Builds the concrete monitoring plan from normalized config.
+
+Purpose:
+1. Extracts OGG environment information.
+2. Passes forward process filters.
+3. Passes forward expected process names.
+4. Emits `process_state_rules`.
+5. Emits `lag_time_rules`.
+6. Emits `disk_usage_rules`.
+7. Emits operator recommendations.
+
+Outputs:
+1. `monitor_plan`
+
+### `discover_processes_node(state)`
+Builds the process inventory for the monitoring run.
+
+Purpose:
+1. Filters `available_processes` using `monitor_plan.process_filters`.
+2. Compares discovered names to `expected_processes`.
+3. Adds synthetic missing entries for expected-but-not-found processes.
+4. Normalizes process records into a consistent structure.
+
+Outputs:
+1. `discovered_processes`
+
+### `collect_status_node(state)`
+Builds a snapshot of process and disk health.
+
+Purpose:
+1. Joins discovered processes with metrics from `process_metrics`.
+2. Scans `process_logs` for `ERROR` entries.
+3. Captures state, lag, checkpoint age, and restart information.
+4. Appends disk usage metrics for OGG home, trail, and report filesystems.
+
+Outputs:
+1. `status_snapshot`
+
+### `classify_problem_node(state)`
+Evaluates the collected snapshot against the monitoring rules.
+
+Purpose:
+1. Evaluates process state using `process_state_rules`.
+2. Evaluates lag using `lag_time_rules`.
+3. Evaluates disk thresholds using `disk_usage_rules`.
+4. Treats `ERROR` log lines as state-related problems.
+5. Produces a structured list of detected problems.
+6. Sets the branch bucket to `good` or `bad`.
+
+Outputs:
+1. `problems`
+2. `health_bucket`
+
+### `route_problem_bucket(state)`
+Returns the branch label used by the conditional edge.
+
+Purpose:
+1. Routes the graph from `classify_problem` to `good` or `bad`.
+
+### `good_node(state)`
+Builds the success-path summary.
+
+Purpose:
+1. Counts the monitored processes.
+2. Produces a concise healthy summary.
+
+Outputs:
+1. `good_summary`
+
+### `bad_node(state)`
+Builds the failure-path summary.
+
+Purpose:
+1. Formats each detected problem.
+2. Includes restart time when available.
+3. Includes a sample log error when available.
+4. Appends operator guidance based on the problem category.
+
+Outputs:
+1. `bad_summary`
+
+### `announce_user_node(state)`
+Produces the final report string.
+
+Purpose:
+1. Adds environment name and timestamp.
+2. Chooses `good_summary` or `bad_summary` based on `health_bucket`.
+3. Produces the final operator-facing `report`.
+
+Outputs:
+1. `report`
+
+### `build_graph()`
+Constructs and compiles the LangGraph workflow.
+
+Purpose:
+1. Registers all implemented nodes.
+2. Declares the entry point.
+3. Declares the linear edges.
+4. Declares the conditional branch from `classify_problem`.
+5. Compiles the graph with `InMemorySaver()`.
+
+## Implemented Graph Flow
+
+Current node order:
+
+1. `intake`
+2. `monitor_plan`
+3. `discover_processes`
+4. `collect_status`
+5. `classify_problem`
+6. `good` or `bad`
+7. `announce_user`
+8. `END`
+
+Current edges:
+
+1. `intake -> monitor_plan`
+2. `monitor_plan -> discover_processes`
+3. `discover_processes -> collect_status`
+4. `collect_status -> classify_problem`
+5. `classify_problem -> good` when `health_bucket == "good"`
+6. `classify_problem -> bad` when `health_bucket == "bad"`
+7. `good -> announce_user`
+8. `bad -> announce_user`
+9. `announce_user -> END`
+
+## Implemented Monitoring Rules
+
+The current code evaluates three rule families inside `monitor_plan` and `classify_problem_node`.
+
+### Process state rules
+Configured in `process_state_rules`.
+
+Current defaults:
+1. Healthy states: `RUNNING`
+2. Bad states: `ABENDED`, `STOPPED`, `MISSING`
+
+### Lag time rules
+Configured in `lag_time_rules`.
+
+Current defaults:
+1. Warning threshold: `300` seconds
+2. Critical threshold: `900` seconds
+
+### Disk usage rules
+Configured in `disk_usage_rules`.
+
+Current defaults:
+1. OGG home warning: `80%`
+2. OGG home critical: `90%`
+3. Trail warning: `80%`
+4. Trail critical: `90%`
+5. Report warning: `80%`
+6. Report critical: `90%`
+
+## Sample Execution Path
+
+The file currently includes a sample run in `__main__`.
+
+Purpose:
+1. Creates a sample state with one healthy Extract and one abended Replicat.
+2. Adds a trail filesystem threshold breach.
+3. Streams graph events using `thread = {"configurable": {"thread_id": "1"}}`.
+4. Prints each event emitted by `graph.stream(...)`.
+
+## Current Strengths
+
+1. The implementation follows the lesson pattern closely: one `TypedDict` state, small node functions, explicit edges, and a conditional branch.
+2. The graph is deterministic and easy to test because all inputs are passed through state.
+3. The plan generation and classification logic are separated cleanly.
+4. The current implementation already covers the three requested rule families: process state, lag, and disk usage.
+
+## Current Gaps To Review
+
+These are the main differences between the current implementation and the larger original target architecture.
+
+1. No live GoldenGate integration yet. `discover_processes_node` reads `available_processes` from input state instead of querying GGSCI, Admin Client, or REST.
+2. No external log or filesystem collection yet. `collect_status_node` reads `process_logs` and `disk_metrics` from input state.
+3. No separate severity-classification node. Severity is assigned directly in `classify_problem_node`.
+4. No enrichment loop. The current graph is single pass only.
+5. No continuous polling path.
+6. No escalation, ticketing, or notification channel integration.
+7. No durable checkpointing. The graph currently uses `InMemorySaver()`.
+
+## Recommended Review Items
+
+These are the best next review points before expanding the implementation.
+
+1. Decide whether to keep the current simple `good` and `bad` branch model or restore the larger investigate and escalate architecture later.
+2. Decide how `discover_processes_node` should fetch real GoldenGate process inventory.
+3. Decide whether `collect_status_node` should split into separate process, log, and disk collection nodes.
+4. Decide whether warnings should still route to `bad`, or whether a third branch such as `warning` is needed.
+5. Decide when to replace `InMemorySaver()` with durable checkpoint storage.
+
+## Verification Checklist
+
+1. Confirm `monitor_plan_node` emits `process_state_rules`, `lag_time_rules`, and `disk_usage_rules`.
+2. Confirm `discover_processes_node` marks expected-but-missing processes as undiscovered.
+3. Confirm `collect_status_node` includes both per-process records and a disk usage record.
+4. Confirm `classify_problem_node` detects bad state, lag threshold breaches, disk threshold breaches, and `ERROR` log lines.
+5. Confirm `route_problem_bucket` sends healthy runs to `good` and unhealthy runs to `bad`.
+6. Confirm `announce_user_node` always emits a final `report`.
+
+## Relevant Files
+
+1. [goldengate_monitor_graph.py](/D:/project/prj4/goldengate_monitor_graph.py) — current implementation.
+2. [context/Lesson_6_Student.py](/D:/project/prj4/context/Lesson_6_Student.py) — reference LangGraph example the implementation was modeled after.
+3. [plan/graph_architecture.md](/D:/project/prj4/plan/graph_architecture.md) — architecture review document that may need further alignment if the implementation evolves again.
