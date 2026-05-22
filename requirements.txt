@@ -7,3 +7,4 @@ langchain-openai
 tavily-python
 ipython
 typing_extensions
+paramiko

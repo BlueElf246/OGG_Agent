@@ -2,20 +2,20 @@
 
 ## Overview
 
-This document describes the LangGraph architecture for an Oracle GoldenGate monitoring agent. The graph is designed as a bounded monitoring and investigation workflow:
+This document describes the LangGraph architecture for the current Oracle GoldenGate monitoring agent implementation in [goldengate_monitor_graph.py](../goldengate_monitor_graph.py). The graph is a short, linear workflow that uses an LLM with bound Paramiko tools to inspect a GoldenGate host and summarize the result.
 
 1. Accept monitoring scope and policies.
-2. Discover and inspect GoldenGate processes.
-3. Detect and classify anomalies.
-4. Enrich the investigation with diagnostics.
-5. Assess impact and decide whether to record, notify, escalate, or continue investigating.
-6. Support either one-shot execution or continuous polling.
+2. Build a monitoring plan from the default config and user input.
+3. Discover GoldenGate processes and gather operating data.
+4. Classify problems from the discovered data.
+5. Produce a final operator-facing report.
 
-The monitor_plan node is responsible for generating three rule families that drive the rest of the graph:
+The graph currently binds four SSH tools to the model using `langchain_core.tools.tool` and `ChatOpenAI.bind_tools`:
 
-1. Process state rules.
-2. Lag time rules.
-3. Disk usage rules.
+1. `connect_ssh` connects to the target host with `ssh.connect`.
+2. `get_process` runs `info all`.
+3. `check_log` runs `view report <process_name>`.
+4. `check_disk` runs `df -h`.
 
 ## Mermaid Diagram
 
@@ -23,76 +23,54 @@ The monitor_plan node is responsible for generating three rule families that dri
 flowchart TD
     A[intake] --> B[monitor_plan]
     B --> C[discover_processes]
-    C --> D[collect_status]
-    D --> E[classify_problem]
-    E -->|good| F[good]
-    F --> G[announce_user]
-    E -->|bad| H[bad]
-    H --> G
-    G --> Z([END])
+    C --> D[classify_problem]
+    D --> E[announce_user]
+    E --> Z([END])
 ```
 
 ## Review Notes
 
-1. The previous draft mixed presentation labels such as `Classify Problem` and `Announce to user` with Python-style node names. The implementation uses normalized snake_case names for graph nodes.
-2. The previous draft mentioned disk usage rules in `monitor_plan` but did not show them clearly in downstream processing. The implementation carries disk metrics through `collect_status` and evaluates them in `classify_problem`.
-3. The previous draft implied `Good` and `Bad` were terminal states. In the implemented graph they are formatting nodes that prepare operator-facing output before `announce_user` emits the final report.
+1. The previous architecture draft described a richer branch structure with `collect_status`, `good`, and `bad` nodes. The current Python file does not include those nodes.
+2. The current implementation routes the flow directly from `discover_processes` to `classify_problem`, then to `announce_user`.
+3. The Python file binds SSH tools to the model, but the graph still uses the model directly inside nodes rather than a separate tool-execution node.
 
 ## Node Purposes
 
 ### intake
-Captures the operator request or scheduler input. This node defines the monitoring target, process filters, runtime mode, thresholds, and alerting policy.
+Captures the operator request or scheduler input. In the current code it sends the task text to the model with `PLAN_PROMPT` and stores the returned configuration in `config`.
 
 ### monitor_plan
-Transforms raw input into an executable monitoring plan. It loads the OGG environment configuration and the rule sets that determine whether downstream classification should mark processes as good or bad. Its main output is a normalized rules object with three parts: process state rules for running, stopped, abended, and missing processes; lag time rules for warning and critical lag thresholds; and disk usage rules for GoldenGate home, trail, and log filesystem thresholds.
+Transforms the config into a monitoring plan. It copies the host settings, GoldenGate environment data, process filters, expected processes, state rules, lag rules, disk rules, and recommendations into a single `monitor_plan` object.
 
 ### discover_processes
-Builds the GoldenGate inventory for the current run. This is where the workflow determines which Extract, Replicat, Distribution, Receiver, and Manager processes are expected and visible.
-
-### collect_status
-Collects raw telemetry for each discovered process. Typical outputs include running state, lag, checkpoint status, last restart time, log scanning for `ERROR` entries, and filesystem usage metrics for the GoldenGate environment.
-
+Builds the GoldenGate inventory prompt and asks the model to use the bound SSH tools against the target host. The prompt describes the available operations: connect, get processes, check log, and check disk.
 
 ### classify_problem
-Based on the rules loaded from `monitor_plan`, it compares expected values with the collected values from `collect_status` and decides whether the monitoring run is good or bad. It evaluates process state, lag time, log errors, and disk usage.
+Asks the model to classify the discovered data against the monitoring rules. The node builds a classification prompt from the discovered process data and the active rules, then stores the result in `problems`.
 
-### Good
-Formats the success path. It prepares a concise healthy summary for the final reporting node.
-
-### Bad
-Formats the failure path. It reports when processes crashed or restarted, what errors were found in the logs, and what the operator should do next.
-
-### Announce to user
-Summarizes the final result and produces the operator-facing report.
+### announce_user
+Summarizes the final result and produces the operator-facing report. It takes the detected problems and converts them into a user-facing announcement.
 
 ## Edge Purposes
 
 ### intake -> monitor_plan
 Moves from raw input to a structured monitoring strategy.
 
-The resulting plan should include process_state_rules, lag_time_rules, and disk_usage_rules for downstream evaluation.
+The resulting plan includes host settings, process filters, process_state_rules, lag_time_rules, disk_usage_rules, and recommendations for downstream prompts.
 
 ### monitor_plan -> discover_processes
-Uses the plan to determine which GoldenGate processes must be inspected.
+Uses the plan to determine which GoldenGate host and GoldenGate-specific settings should be included in the discovery prompt.
 
-It also passes forward the rule sets that later nodes use to judge health.
+### discover_processes -> classify_problem
+Passes the model-generated discovery output directly into classification.
 
-### discover_processes -> collect_status
-Turns process inventory into live telemetry collection.
+### classify_problem -> announce_user
+Converts the classification result into a final operator-facing summary.
 
-### collect_status -> classify_problem
-Passes the raw status snapshot, lag measurements, log errors, and disk usage metrics into `classify_problem`.
+### announce_user -> END
+Ends the workflow after producing the report.
 
-### classify_problem -> good
-If the collected data passes the configured rules, route to the `good` node.
-
-### classify_problem -> bad
-If the collected data fails any configured rule, route to the `bad` node.
-
-### good/bad -> announce_user
-Both formatting paths converge in `announce_user`, which emits the final report and ends the run.
-
-###
+## Reading Order
 1. Read the Mermaid diagram to understand the control flow.
 2. Read the node summaries to understand responsibilities.
 3. Read the edge summaries to understand routing logic and loop boundaries.
@@ -100,7 +78,6 @@ Both formatting paths converge in `announce_user`, which emits the final report 
 
 ## Implementation Notes
 
-- Keep collection nodes separate from decision nodes so the graph stays testable and easy to extend.
-- Keep the first version read-only. Avoid automatic restart or remediation until monitoring quality is proven.
-- Replace in-memory checkpointing with durable checkpointing before using this in a production operations workflow.
-- Add source and timestamp metadata to evidence records so repeated polling does not create ambiguous state.
+- The graph currently relies on LLM prompting rather than explicit Python parsing for discovery and classification.
+- The Paramiko tools are bound to the model and can be invoked for SSH connectivity, GoldenGate process listing, report inspection, and disk checks.
+- The workflow remains read-only and does not perform restart or remediation actions.
