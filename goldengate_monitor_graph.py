@@ -6,12 +6,12 @@ from datetime import datetime
 from typing import Any, Literal, TypedDict
 
 from dotenv import load_dotenv
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
 
 _ = load_dotenv()
 
-memory = SqliteSaver.from_conn_string(":memory:")
+memory = InMemorySaver()
 
 
 class AgentState(TypedDict, total=False):
@@ -409,5 +409,6 @@ if __name__ == "__main__":
         },
     }
 
-    result = graph.invoke(sample_state)
-    print(result["report"])
+    thread = {"configurable": {"thread_id": "1"}}
+    for event in graph.stream(sample_state, thread):
+        print(event)
