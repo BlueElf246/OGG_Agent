@@ -21,10 +21,12 @@ The graph currently binds four SSH tools to the model using `langchain_core.tool
 
 ```mermaid
 flowchart TD
-    A[intake] --> B[monitor_plan]
-    B --> C[discover_processes]
-    C --> D[classify_problem]
-    D --> E[announce_user]
+    A[intake] --> B[request more infomation]
+    B --> C[orchestrator]
+    B --> A
+    C --> D[tools]
+    C --> E[analyze answer]
+    D --> C
     E --> Z([END])
 ```
 
