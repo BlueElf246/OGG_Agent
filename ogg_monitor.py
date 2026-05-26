@@ -18,19 +18,23 @@ from paramiko_tools import check_disk, check_log, connect_ssh, get_process
 from config import setting
 #### defining model
 planner_model = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+
 memory = InMemorySaver()
 #### defining prompts
 def get_intake_node_prompt():
     return """
-You are an config verifier
-Your task is to return the config based on context_section.
-Rule:
-1. If any field in the Updated Config is EMPTY (for example ''), return is_clear=False,config={Updated Config} and provide clarification_needed with details about what's missing or incomplete.
-2. If the config is complete and valid, return is_clear=True and config={Updated Config}.
-Workflow:
-1. Read the Exisiting Config
-2. Create Updated Config from the Existing Config and Information from User Message if needed.  
-3. return Update Config
+You are an config verifier. 
+Your task is checking if the existing config is fully filled or not.
+Rules:
+1. If the config is fully filled (not empty), return is_clear=true and return the config, else return is_clear=false and ask the user for missing fields.
+2. No follow-up questions, no explanations
+Input:
+- User Message: the last message from user
+- Existing Config: the config provided by user or extracted from the user message
+- Conversation Summary: a brief summary of the conversation history, it can be empty if no conversation
+Output:
+- is_clear: if the Updated Config is fully fill return true, else return false
+- config: the updated config
 """
 def get_conversation_summary_prompt() -> str:
     return """You are an expert conversation summarizer.
@@ -39,9 +43,8 @@ Your task is to create a brief 1-2 sentence summary of the conversation (max 30-
 
 Include:
 - Main topics discussed
-- Important facts or entities mentioned
+- Important infomation provided by the user
 - Any unresolved questions if applicable
-- Sources file name (e.g., file1.pdf) or documents referenced
 
 Exclude:
 - Greetings, misunderstandings, off-topic content.
@@ -51,6 +54,23 @@ Output:
 - Do NOT include any explanations or justifications.
 - If no meaningful topics exist, return an empty string.
 """
+#### helper
+def is_config_complete(config: str) -> bool:
+    #### parsing through the config, return true if none of all the fields is empty
+    try:
+        config_dict = eval(config) if isinstance(config, str) else config
+        if not isinstance(config_dict, dict):
+            return False
+        #### check recursively
+        for key, value in config_dict.items():
+            #### if value is a dict, check recursively
+            if isinstance(value, dict):
+                if not is_config_complete(value):
+                    return False
+        return True
+    except Exception as e:
+        print(f"Error parsing config: {e}")
+        return False
 #### defining state
 class AgentState(MessagesState, total=False):
     task: str
@@ -79,16 +99,14 @@ def intake_node(state: AgentState):
     "message" = AIMessage(content=clarification)
     """
     # print(state)
-    last_message = state["messages"][-1] if state["messages"] else None
+    last_message = state["messages"][-1].content if state["messages"] else None
     # print(conversation)
     config = state.get("config", setting.server_config)
     context_section = f"Context Section:\nUser Message: {last_message}\nExisting Config:\n{config}\n Conversation Summary:\n{state.get('conversation_summary', '')}"
     print(context_section)
     llm_with_structure = planner_model.with_config(temperature=0.1).with_structured_output(QueryAnalysis)
     response = llm_with_structure.invoke([SystemMessage(content=get_intake_node_prompt()) , HumanMessage(content=context_section)])
-    print('response: ', response)
-    # print('config: ', response.config)
-    # print('clarification_needed: ', response.clarification_needed)
+    
     if response.is_clear:
         return {"is_complete": True, "config": response.config}
     else:
@@ -130,7 +148,7 @@ def build_graph():
     builder.add_edge(START, "summarize_history")
     builder.add_edge("summarize_history", "intake")
     builder.add_conditional_edges("intake", route_after_request)
-    builder.add_edge("request_clarification", "intake")
+    builder.add_edge("request_clarification", "summarize_history")
 
 
     return builder.compile(checkpointer=memory, interrupt_before=["request_clarification"])
