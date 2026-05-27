@@ -17,24 +17,26 @@ from paramiko_tools import check_disk, check_log, connect_ssh, get_process
 
 from config import setting
 #### defining model
-planner_model = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+planner_model = ChatOpenAI(model="gpt-4o", temperature=0.1)
 
 memory = InMemorySaver()
 #### defining prompts
 def get_intake_node_prompt():
     return """
 You are an config verifier. 
-Your task is checking if the existing config is fully filled or not.
+Your task is to extract the infomation from User Message and fill in Existing Config
 Rules:
-1. If the config is fully filled (not empty), return is_clear=true and return the config, else return is_clear=false and ask the user for missing fields.
-2. No follow-up questions, no explanations
+1. The config is filled when all values are not empty (For example 'username': 'ec2-user' -> valid,  'username': '' -> invalid)
+2. If the config is fully filled, return is_clear=true and return the config, else return is_clear=false and ask the user provide infomation
+3. No follow-up questions, no explanations
+
 Input:
 - User Message: the last message from user
-- Existing Config: the config provided by user or extracted from the user message
+- Existing Config: the config provided by user
 - Conversation Summary: a brief summary of the conversation history, it can be empty if no conversation
 Output:
-- is_clear: if the Updated Config is fully fill return true, else return false
-- config: the updated config
+- is_clear:
+- config:
 """
 def get_conversation_summary_prompt() -> str:
     return """You are an expert conversation summarizer.

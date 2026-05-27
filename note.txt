@@ -1,0 +1,10 @@
+Input:
+- User Message: the last message from user
+- Existing Config: the config provided by user or extracted from the user message
+- Conversation Summary: a brief summary of the conversation history, it can be empty if no conversation
+Output:
+- is_clear: if the Updated Config is fully fill return true, else return false
+- config: the updated config
+
+
+Your task is checking if the existing config is fully filled or not based on user context.
