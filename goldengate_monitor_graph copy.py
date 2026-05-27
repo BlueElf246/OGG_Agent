@@ -145,7 +145,6 @@ def orchestrator_node(state: AgentState):
 def _get_analyze_prompt():
     return """
 Your are an Oracle GoldenGate analyst. Your task is to analyze the collected infomation and determine if it's sufficient to identify the problem and provide recommendation.
-
 """
 def analyze_data_node(state: AgentState):
     data_collected = state.get("data_collected", {})

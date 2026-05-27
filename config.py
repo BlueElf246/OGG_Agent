@@ -11,7 +11,7 @@ class config:
         "server":{
             "hostname": "54.89.249.254",
             "username": "ec2-user",
-            "password": "",
+            "password": "12345678",
             "key_filename": "abc.pem"
         } }
 

@@ -20,6 +20,8 @@ def connect_ssh(host: str, username: str, password: str, port: int = 22, timeout
             key_filename=key_filename,
         )
         return f"Connected to {host}:{port}"
+    except Exception as error:
+        return f"Error: {error}"
     finally:
         client.close()
 
@@ -41,6 +43,8 @@ def get_process(host: str, username: str, password: str, port: int = 22, timeout
         output = stdout.read().decode("utf-8", errors="replace")
         error_output = stderr.read().decode("utf-8", errors="replace")
         return output if output else error_output
+    except Exception as error:
+        return f"Error: {error}"
     finally:
         client.close()
 
@@ -62,6 +66,8 @@ def check_log(host: str, username: str, password: str, process_name: str, port: 
         output = stdout.read().decode("utf-8", errors="replace")
         error_output = stderr.read().decode("utf-8", errors="replace")
         return output if output else error_output
+    except Exception as error:
+        return f"Error: {error}"
     finally:
         client.close()
 
@@ -83,5 +89,7 @@ def check_disk(host: str, username: str, password: str, port: int = 22, timeout:
         output = stdout.read().decode("utf-8", errors="replace")
         error_output = stderr.read().decode("utf-8", errors="replace")
         return output if output else error_output
+    except Exception as error:
+        return f"Error: {error}"
     finally:
         client.close()
